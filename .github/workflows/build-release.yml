@@ -1,0 +1,155 @@
+# Build release binaries for Windows, Linux, and macOS.
+#
+# - Every push / PR: artifacts appear under the workflow run (Actions tab → workflow → Artifacts).
+# - Push a tag like v0.1.0: creates a GitHub Release and attaches the same zip/tar files
+#   so visitors can download from the repo Releases page.
+#
+# Linux/macOS binaries may need system libraries at runtime (GPU/Vulkan, etc.); see README.
+
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Match Cargo.toml rust-version
+  RUST_TOOLCHAIN: "1.88"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/markdown_view.exe dist/
+          Compress-Archive -Path dist/markdown_view.exe -DestinationPath markdown_view-windows-x86_64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: markdown_view-windows-x86_64
+          path: markdown_view-windows-x86_64.zip
+
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-asset-windows
+          path: markdown_view-windows-x86_64.zip
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Iced / wgpu / Wayland)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libfontconfig1-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libgtk-3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          tar czvf markdown_view-linux-x86_64-gnu.tar.gz -C target/release markdown_view
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: markdown_view-linux-x86_64-gnu
+          path: markdown_view-linux-x86_64-gnu.tar.gz
+
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-asset-linux
+          path: markdown_view-linux-x86_64-gnu.tar.gz
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release, universal binary)
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          lipo -create -output markdown_view \
+            target/aarch64-apple-darwin/release/markdown_view \
+            target/x86_64-apple-darwin/release/markdown_view
+          chmod +x markdown_view
+          tar czvf markdown_view-macos-universal.tar.gz markdown_view
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: markdown_view-macos-universal
+          path: markdown_view-macos-universal.tar.gz
+
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-asset-macos
+          path: markdown_view-macos-universal.tar.gz
+
+  release:
+    needs: [build-windows, build-linux, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-asset-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
